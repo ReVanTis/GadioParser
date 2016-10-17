@@ -68,6 +68,12 @@ namespace GadioParser
     {
         static void Main(string[] args)
         {
+            bool needDownload = false;
+            int CrawlerMaxDegreeOfParallelism = 4;
+            int DownloaderMaxDegreeOfParallelism = 4;
+            object ListLock = new object();
+            int GadioCounter = 0;
+            object GadioCounterLock = new object();
             List<GadioItem> GadioItemList = new List<GadioItem>();
 
             if (File.Exists("GadioItems.json"))
@@ -82,11 +88,19 @@ namespace GadioParser
             else
             {
                 string HtmlPrefix = @"http://www.g-cores.com/categories/9/originals?page=";
-                int maxPages = 25;
-                for (int i = 1; i <= maxPages; i++)
+                int maxPages = 21;
+
+                List<string> htmllist = new List<string>();
+
+                for (int c = 1; c <= maxPages; c++)
                 {
+                    htmllist.Add(HtmlPrefix + c);
+                }
+                Parallel.ForEach(htmllist, new ParallelOptions { MaxDegreeOfParallelism = CrawlerMaxDegreeOfParallelism }, (G) =>
+                {
+
                     HtmlDocument GadioDoc = new HtmlDocument();
-                    WebRequest request = WebRequest.CreateHttp(new Uri(HtmlPrefix + i));
+                    WebRequest request = WebRequest.CreateHttp(new Uri(G));
                     request.Method = "GET";
                     using (var response = request.GetResponse())
                     {
@@ -96,11 +110,14 @@ namespace GadioParser
                         }
                     }
                     //DO content handling
-
-                    foreach (var node in GadioDoc.DocumentNode.Descendants("div").Where(d =>
-                    d.Attributes.Contains("class") && d.Attributes["class"].Value.Contains("showcase-audio")))
+                    var a = GadioDoc.DocumentNode.Descendants("div").Where(d => d.Attributes.Contains("class") && d.Attributes["class"].Value.Contains("showcase-audio")).ToList();
+                    foreach (var node in a)
                     {
-                        Console.WriteLine("Gadio Hit!");
+                        lock (GadioCounterLock)
+                        {
+                            Console.WriteLine(GadioCounter +" Gadio Hit!");
+                            GadioCounter++;
+                        }
                         GadioItem thisItem = new GadioItem();
 
                         string ImgUrl = node.Descendants("img").ToList()[0].Attributes["src"].Value;
@@ -120,27 +137,27 @@ namespace GadioParser
                         thisItem.ChannelLink = new Uri(channel_link);
                         DateTime post_date = DateTime.Parse(childs[0].ChildNodes[2].InnerText.Trim());
                         thisItem.PostDate = post_date;
-                        var description = childs[3].InnerText;
+                        var description = childs[2].InnerText;
                         thisItem.Description = description;
                         {
                             if (thisItem.Audio != null)
                                 continue;
                             HtmlDocument GadioDoc1 = new HtmlDocument();
                             WebRequest request1 = WebRequest.CreateHttp(new Uri(thisItem.Link.ToString()));
-                            request.Method = "GET";
-                            using (var response = request.GetResponse())
+                            request1.Method = "GET";
+                            using (var response = request1.GetResponse())
                             {
                                 using (StreamReader sr = new StreamReader(response.GetResponseStream(), Encoding.UTF8))
                                 {
-                                    GadioDoc.Load(sr);
+                                    GadioDoc1.Load(sr);
                                 }
                             }
 
-                            foreach (var node1 in GadioDoc.DocumentNode.Descendants("script"))
+                            foreach (var node1 in GadioDoc1.DocumentNode.Descendants("script"))
                             {
                                 if (node1.Attributes["type"] != null && node1.Attributes["type"].Value == "text/javascript" && node1.InnerHtml.Contains("AudioPlayer"))
                                 {
-                                    Console.WriteLine("Audio Hit!");
+                                    //Console.WriteLine("Audio Hit!");
 
                                     int start = node1.InnerHtml.IndexOf("AudioPlayer(") + "AudioPlayer(".Length;
                                     int length = node1.InnerHtml.LastIndexOf(')', node1.InnerHtml.LastIndexOf(')') - 1) - node1.InnerHtml.IndexOf("AudioPlayer(") - "AudioPlayer(".Length;
@@ -159,18 +176,30 @@ namespace GadioParser
                                 }
                             }
                         }
-                        GadioItemList.Add(thisItem);
-
+                        lock (ListLock)
+                        {
+                            GadioItemList.Add(thisItem);
+                        }
                     }
-                }
+                });
                 DataContractJsonSerializer dcjs = new DataContractJsonSerializer(typeof(List<GadioItem>));
+                
+                //TODO: change to compare link int.
+                GadioItemList.Sort((a, b) =>
+                {
+                    int left = int.Parse(a.Link.ToString().Split('/').Last());
+                    int right = int.Parse(b.Link.ToString().Split('/').Last());
+                    return left.CompareTo(right);
+                });
+
                 using (FileStream fs = File.OpenWrite("GadioItems.json"))
                 {
                     dcjs.WriteObject(fs, GadioItemList);
                 }
             }
+            if (!needDownload)
+                return;
 
-            
             if (!Directory.Exists("Audio"))
             {
                 Directory.CreateDirectory("Audio");
@@ -181,69 +210,69 @@ namespace GadioParser
 
             List<GadioItem> missingContent = new List<GadioItem>();
 
-            Parallel.ForEach(GadioItemList, new ParallelOptions { MaxDegreeOfParallelism = 4 }, (G) =>
-             {
-                 int retrycount = 0;
-                 retry:
-                 if (File.Exists(Path.Combine("Audio", G.Channel + "." + G.Title + ".mp3"))||File.Exists(CleanFileName(Path.Combine("Audio", G.Channel + "." + G.Title + ".mp3"))))
-                 {
-                     lock (ConsoleLock)
-                     {
-                         counter++;
-                         Console.WriteLine(Path.Combine("["+counter+"/"+GadioItemList.Count+"]"+"+Audio", G.Channel + "." + G.Title + ".mp3") + "already downloaded.");
-                     }
-                     return;
-                 }
-                 try
-                 {
-                     string url = G.Audio.mediaSrc.mp3[0];
-                     HttpWebRequest webrequest = (HttpWebRequest)WebRequest.Create(url);
-                     webrequest.Timeout = 30000;
-                     webrequest.ReadWriteTimeout = 30000;
-                     webrequest.Proxy = null;
-                     webrequest.KeepAlive = false;
-                     var webresponse = (HttpWebResponse)webrequest.GetResponse();
+            Parallel.ForEach(GadioItemList, new ParallelOptions { MaxDegreeOfParallelism = DownloaderMaxDegreeOfParallelism }, (G) =>
+            {
+                int retrycount = 0;
+                retry:
+                if (File.Exists(Path.Combine("Audio", G.Channel + "." + G.Title + ".mp3")) || File.Exists(CleanFileName(Path.Combine("Audio", G.Channel + "." + G.Title + ".mp3"))))
+                {
+                    lock (ConsoleLock)
+                    {
+                        counter++;
+                        Console.WriteLine(Path.Combine("[" + counter + "/" + GadioItemList.Count + "]" + "+Audio", G.Channel + "." + G.Title + ".mp3") + "already downloaded.");
+                    }
+                    return;
+                }
+                try
+                {
+                    string url = G.Audio.mediaSrc.mp3[0];
+                    HttpWebRequest webrequest = (HttpWebRequest)WebRequest.Create(url);
+                    webrequest.Timeout = 30000;
+                    webrequest.ReadWriteTimeout = 30000;
+                    webrequest.Proxy = null;
+                    webrequest.KeepAlive = false;
+                    var webresponse = (HttpWebResponse)webrequest.GetResponse();
 
-                     using (Stream sr = webrequest.GetResponse().GetResponseStream())
-                     using (FileStream sw = File.Create(CleanFileName(Path.Combine("Audio",G.Channel+"."+G.Title+".mp3"))))
-                     {
-                         sr.CopyTo(sw);
-                     }
+                    using (Stream sr = webrequest.GetResponse().GetResponseStream())
+                    using (FileStream sw = File.Create(CleanFileName(Path.Combine("Audio", G.Channel + "." + G.Title + ".mp3"))))
+                    {
+                        sr.CopyTo(sw);
+                    }
 
-                     lock (ConsoleLock)
-                     {
-                         counter++;
-                         Console.WriteLine(Path.Combine("[" + counter + "/" + GadioItemList.Count + "]"+"Audio", G.Channel + "." + G.Title + ".mp3") + " done.");
-                     }
-                 }
+                    lock (ConsoleLock)
+                    {
+                        counter++;
+                        Console.WriteLine(Path.Combine("[" + counter + "/" + GadioItemList.Count + "]" + "Audio", G.Channel + "." + G.Title + ".mp3") + " done.");
+                    }
+                }
 
-                 catch (Exception ee)
-                 {
-                     lock (ConsoleLock)
-                     {
-                         Console.WriteLine("Exception occured during processing: " + Path.Combine("Audio", G.Channel + "." + G.Title + ".mp3"));
-                         Console.Write(FlattenException(ee));
-                         Console.WriteLine();
-                     }
-                     if(File.Exists(Path.Combine("Audio", G.Channel + "." + G.Title + ".mp3")))
-                     {
-                         File.Delete(Path.Combine("Audio", G.Channel + "." + G.Title + ".mp3"));
-                     }
-                     retrycount++;
-                     if (retrycount == 10)
-                     {
-                         lock (ConsoleLock)
-                         {
-                             Console.WriteLine("Max retry count reached: " + Path.Combine("Audio", G.Channel + "." + G.Title + ".mp3"));
-                             missingContent.Add(G);
-                         }
-                         return;
-                     }
-                     Thread.Sleep(5000);
+                catch (Exception ee)
+                {
+                    lock (ConsoleLock)
+                    {
+                        Console.WriteLine("Exception occured during processing: " + Path.Combine("Audio", G.Channel + "." + G.Title + ".mp3"));
+                        Console.Write(FlattenException(ee));
+                        Console.WriteLine();
+                    }
+                    if (File.Exists(Path.Combine("Audio", G.Channel + "." + G.Title + ".mp3")))
+                    {
+                        File.Delete(Path.Combine("Audio", G.Channel + "." + G.Title + ".mp3"));
+                    }
+                    retrycount++;
+                    if (retrycount == 10)
+                    {
+                        lock (ConsoleLock)
+                        {
+                            Console.WriteLine("Max retry count reached: " + Path.Combine("Audio", G.Channel + "." + G.Title + ".mp3"));
+                            missingContent.Add(G);
+                        }
+                        return;
+                    }
+                    Thread.Sleep(5000);
 
-                     goto retry;
-                 }
-             });
+                    goto retry;
+                }
+            });
             DataContractJsonSerializer dcjsmissing = new DataContractJsonSerializer(typeof(List<GadioItem>));
             using (FileStream fs = File.OpenWrite("MissingGadioItems.json"))
             {
