@@ -13,9 +13,20 @@ using Newtonsoft.Json;
 
 namespace GadioParser
 {
+    public class DownloadJob
+    {
+        public string url;
+        public string savePath;
+        public DownloadJob() { }
+        public DownloadJob(string a,string b)
+        {
+            url = a;
+            savePath = b;
+        }
+    }
     public class GadioHelper
     {
-        static string cdnPrefix = @"http://alioss.g-cores.com/";
+        static string cdnPrefix = @"http://alioss.g-cores.com";
         public static List<GadioItem> GetItemList(int CrawlerMaxDegreeOfParallelism = 4)
         {
             object ListLock = new object();
@@ -36,7 +47,7 @@ namespace GadioParser
             {
 
                 HtmlDocument GadioDoc = new HtmlDocument();
-                WebRequest request = WebRequest.CreateHttp(new Uri(G));
+                WebRequest request = WebRequest.CreateHttp(G);
                 request.Method = "GET";
                 using (var response = request.GetResponse())
                 {
@@ -79,7 +90,7 @@ namespace GadioParser
                         if (thisItem.Audio != null)
                             continue;
                         HtmlDocument GadioDoc1 = new HtmlDocument();
-                        WebRequest request1 = WebRequest.CreateHttp(new Uri(thisItem.Link.ToString()));
+                        WebRequest request1 = WebRequest.CreateHttp(thisItem.Link.ToString());
                         request1.Method = "GET";
                         using (var response = request1.GetResponse())
                         {
@@ -154,40 +165,54 @@ namespace GadioParser
 
         public static void DownloadUri(string url, string path)
         {
-            HttpWebRequest webrequest = (HttpWebRequest)WebRequest.Create(url);
-            webrequest.Timeout = 30000;
-            webrequest.ReadWriteTimeout = 30000;
-            webrequest.Proxy = null;
-            webrequest.KeepAlive = false;
-            var webresponse = (HttpWebResponse)webrequest.GetResponse();
-
-            using (Stream sr = webrequest.GetResponse().GetResponseStream())
-            using (FileStream sw = File.Create(CleanFileName(path)))
-            {
-                sr.CopyTo(sw);
-            }
+            Program.downloadJobs.Add(new DownloadJob() { url = url, savePath = path });
         }
         public static void DownloadUri(Uri url, string path)
         {
-            HttpWebRequest webrequest = (HttpWebRequest)WebRequest.Create(url);
-            webrequest.Timeout = 30000;
-            webrequest.ReadWriteTimeout = 30000;
-            webrequest.Proxy = null;
-            webrequest.KeepAlive = false;
-            var webresponse = (HttpWebResponse)webrequest.GetResponse();
-
-            using (Stream sr = webrequest.GetResponse().GetResponseStream())
-            using (FileStream sw = File.Create(CleanFileName(path)))
-            {
-                sr.CopyTo(sw);
-            }
+            Program.downloadJobs.Add(new DownloadJob() { url = url.ToString(), savePath = path });
         }
-        public static void DownloadItem(GadioItem G, string path)
+
+        public static List<DownloadJob> DownloadItem(GadioItem G, string path)
         {
-            string url = G.Audio.mediaSrc.mp3[0];
-            DownloadUri(url, path);
+            List<DownloadJob> rt = new List<DownloadJob>();
+            if(Directory.Exists(path) || (!File.Exists(path) && !Directory.Exists(path)))
+            {
+                Directory.CreateDirectory(path);
+            }
+            else
+            {
+                throw new Exception("path is file.");
+            }
+            string rootPath = Path.Combine(path, G.Link.ToString().Split('/').Last());
+
+            Directory.CreateDirectory(rootPath);
             
-            //download frontcover
+
+            string url = G.Audio.mediaSrc.mp3[0];
+            string mp3FileName = G.Audio.mediaSrc.mp3[0];
+
+            rt.Add(new DownloadJob(url, Path.Combine(rootPath, G.Link.ToString().Split('/').Last() + mp3FileName.ToString().Substring(mp3FileName.ToString().LastIndexOf(".")))));
+            rt.Add(new DownloadJob(G.FronCoverImg.ToString(), Path.Combine(rootPath,G.Link.ToString().Split('/').Last() + G.FronCoverImg.ToString().Substring(G.FronCoverImg.ToString().LastIndexOf(".")))));
+
+            foreach (var i in G.Audio.timelines)
+            {
+                if(!Directory.Exists(Path.Combine(rootPath, "timeline")))
+                    Directory.CreateDirectory(Path.Combine(rootPath, "timeline"));
+                string assetUrl = "";
+                if (i.asset.url == null)
+                    continue;
+                if(i.asset.url.StartsWith("http"))
+                {
+                    assetUrl = i.asset.url;
+                }
+                else
+                {
+                    assetUrl = cdnPrefix + i.asset.url;
+                }
+
+                rt.Add(new DownloadJob(assetUrl, Path.Combine(rootPath,"timeline", assetUrl.Split('/').Last())));
+            }
+            return rt;
         }
     }
     
@@ -202,7 +227,7 @@ namespace GadioParser
         public Uri ChannelLink;
         public AudioItem Audio;
     }
-
+#pragma warning disable IDE1006 // Naming Styles
     public class AudioItem
     {
         public Mediasrc mediaSrc { get; set; }
@@ -218,6 +243,7 @@ namespace GadioParser
     public class Timeline
     {
         public int id { get; set; }
+
         public int media_id { get; set; }
         public int at { get; set; }
         public string title { get; set; }
@@ -231,18 +257,22 @@ namespace GadioParser
     {
         public string url { get; set; }
     }
-
+#pragma warning restore IDE1006 // Naming Styles
     class Program
     {
+        public static List<DownloadJob> downloadJobs = new List<DownloadJob>();
+        public static object ConsoleLock = new object();
+        public static object logLock = new object();
+        public static object ConfirmedListLock = new object();
         static void Main(string[] args)
         {
             JsonSerializer serializer = new JsonSerializer();
-            bool needDownload = false;
+            bool needDownload = true;
             int DownloaderMaxDegreeOfParallelism = 4;
             List<GadioItem> GadioItemList = new List<GadioItem>();
             bool clearFlag = false;
-
-            if(clearFlag)
+            
+            if (clearFlag)
             {
                 if (File.Exists("GadioItems.json"))
                     File.Delete("GadioItems.json");
@@ -300,34 +330,229 @@ namespace GadioParser
                 Directory.CreateDirectory("Audio");
             }
 
-            object ConsoleLock = new object();
+            
             int counter = 0;
 
             List<GadioItem> missingContent = new List<GadioItem>();
+            List<DownloadJob> failedJob = new List<DownloadJob>();
 
-            Parallel.ForEach(GadioItemList, new ParallelOptions { MaxDegreeOfParallelism = DownloaderMaxDegreeOfParallelism }, (G) =>
+            foreach(var G in GadioItemList)
             {
-                retry:
+                var rt = GadioHelper.DownloadItem(G, "Audio");
+                downloadJobs.AddRange(rt);
+            }
+            object lineLock = new object();
+            bool[] lineOccupied = new bool[DownloaderMaxDegreeOfParallelism];
+            if (!File.Exists("confirmed.txt"))
+                File.Create("confirmed.txt");
+            var list = File.ReadAllLines("confirmed.txt");
+
+            Parallel.ForEach(downloadJobs, new ParallelOptions { MaxDegreeOfParallelism = DownloaderMaxDegreeOfParallelism }, (J) =>
+            {
+                int max_retry = 30;
                 int retryCount = 0;
+
+                retry:
+                int occu_line = -1;
+                lock (lineLock)
+                {
+                    for (int i = 0; i < DownloaderMaxDegreeOfParallelism; i++)
+                    {
+                        if (!lineOccupied[i])
+                        {
+                            lineOccupied[i] = true;
+                            occu_line = i + 1;
+                            break;
+                        }
+                    }
+                }
                 try
                 {
-                    GadioHelper.DownloadItem(G, G.Link.ToString().Split('/').Last() + G.Link.ToString().Substring(G.Link.ToString().LastIndexOf(".") + 1));
-                    GadioHelper.DownloadUri(G.FronCoverImg, G.Link.ToString().Split('/').Last() + G.FronCoverImg.ToString().Substring(G.FronCoverImg.ToString().LastIndexOf(".") + 1));
+                    //if (!File.Exists(J.savePath))
+                    {
+                        bool confirmedDone = false;
+                        lock (ConfirmedListLock)
+                        {
+                            if (list.Contains(J.url) && (File.Exists(J.savePath)))
+                            {
+                                confirmedDone = true;
+                                lock (ConsoleLock)
+                                {
+                                    if (occu_line != -1)
+                                    {
+                                        counter++;
+                                        Console.SetCursorPosition(0, occu_line * 2);
+                                        ClearCurrentConsoleLine();
+                                        Console.WriteLine(retryCount + "/" + max_retry + " Downloaded: " + J.savePath + " already exist.");
 
+                                        Console.SetCursorPosition(0, 0);
+                                        ClearCurrentConsoleLine();
+                                        Console.WriteLine(retryCount + "/" + max_retry + " Job downloaded: " + counter + " / " + downloadJobs.Count);
+                                    }
+                                }
+                            }
+                        }
+                        if (!confirmedDone)
+                        {
+                            lock (ConsoleLock)
+                            {
+                                if (occu_line != -1)
+                                {
+                                    Console.SetCursorPosition(0, occu_line * 2);
+                                    ClearCurrentConsoleLine();
+                                    Console.WriteLine(retryCount + "/" + max_retry + " Connecting : " + J.url);
+                                }
+                            }
+
+                            using (var client = new WebClient())
+                            {
+                                HttpWebRequest wr = (HttpWebRequest)WebRequest.CreateHttp(J.url);
+                                //wr.Method = "GET";
+                                wr.Timeout = 3000;
+                                //wr.UserAgent = @"Mozilla / 5.0(Windows NT 10.0; WOW64; rv: 50.0) Gecko / 20100101 Firefox / 50.0";
+                                //wr.Referer = new Uri(J.url).Host;
+                                //wr.Credentials=CredentialCache.DefaultCredentials;
+
+                                using (var response = wr.GetResponse())
+                                {
+                                    Int64 fileSize = response.ContentLength;
+                                    bool noDownload = false;
+                                    if (File.Exists(J.savePath))
+                                    {
+                                        FileInfo fi = new FileInfo(J.savePath);
+                                        if (fi.Length < fileSize)
+                                        {
+                                            File.Delete(J.savePath);
+                                        }
+                                        else
+                                        {
+                                            noDownload = true;
+
+                                            lock (ConsoleLock)
+                                            {
+                                                if (occu_line != -1)
+                                                {
+                                                    counter++;
+                                                    Console.SetCursorPosition(0, occu_line * 2);
+                                                    ClearCurrentConsoleLine();
+                                                    Console.WriteLine(retryCount + "/" + max_retry + " Downloaded : " + J.savePath + " already exist.");
+
+                                                    Console.SetCursorPosition(0, 0);
+                                                    ClearCurrentConsoleLine();
+                                                    Console.WriteLine(retryCount + "/" + max_retry + " Job downloaded: " + counter + " / " + downloadJobs.Count);
+                                                }
+                                            }
+                                        }
+                                    }
+                                    lock (ConsoleLock)
+                                    {
+                                        if (occu_line != -1)
+                                        {
+                                            Console.SetCursorPosition(0, occu_line * 2);
+                                            ClearCurrentConsoleLine();
+                                            Console.WriteLine(retryCount + "/" + max_retry + " Downloading: " + J.url + " to " + J.savePath);
+                                        }
+                                    }
+                                    if (!noDownload)
+                                    {
+                                        using (var responseStream = response.GetResponseStream())
+                                        {
+                                            using (var localStream = File.OpenWrite(J.savePath))
+                                            {
+                                                byte[] downloadBuffer = new byte[4096];
+
+                                                int bytes = 0;
+                                                while ((bytes = responseStream.Read(downloadBuffer, 0, downloadBuffer.Length)) > 0)
+                                                {
+                                                    localStream.Write(downloadBuffer, 0, bytes);
+                                                    if (occu_line != -1)
+                                                    {
+                                                        double percentage = (double)localStream.Length / (double)fileSize;
+                                                        StringBuilder sb = new StringBuilder();
+                                                        sb.Append(string.Format("{0,3:000.00}", percentage * 100) + "% [");
+                                                        for (float i = 0; i <= 1; i = i + 0.01f)
+                                                        {
+                                                            if (i <= percentage)
+                                                                sb.Append("*");
+                                                            else sb.Append(" ");
+                                                        }
+                                                        sb.Append("] ");
+
+                                                        sb.Append(localStream.Length.ToString("N") + "/" + fileSize.ToString("N"));
+
+                                                        lock (ConsoleLock)
+                                                        {
+                                                            Console.SetCursorPosition(0, occu_line * 2 + 1);
+                                                            ClearCurrentConsoleLine();
+                                                            Console.WriteLine(sb);
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+
+                                lock (ConsoleLock)
+                                {
+                                    if (occu_line != -1)
+                                    {
+                                        counter++;
+                                        Console.SetCursorPosition(0, 0);
+                                        ClearCurrentConsoleLine();
+                                        Console.WriteLine("Job downloaded: " + counter + " / " + downloadJobs.Count);
+                                    }
+                                }
+                                lock (ConfirmedListLock)
+                                {
+                                    File.AppendAllText("confirmed.txt", J.url + "\n");
+                                }
+                            }
+                        }
+                    }
                 }
-                catch(Exception e)
+                catch (Exception e)
                 {
-                    if(retryCount!=10)
-                    goto retry;
+                    var exMessage = FlattenException(e);
+                    exMessage = "Exception occured during downloading: " + J.url + "\n" + exMessage;
+                    lock (logLock)
+                    {
+                        File.AppendAllText("log.txt", DateTime.Now + "\n" + exMessage + "\n");
+                    }
+                    if (retryCount < max_retry)
+                    {
+                        retryCount++;
+                        goto retry;
+                    }
+                    failedJob.Add(J);
+                    lock (logLock)
+                    {
+                        File.AppendAllText("log.txt", "ERROR:" + DateTime.Now + ": " + J.url + " failed 30 times.\n");
+                    }
+                }
+                finally
+                {
+                    lock (lineLock)
+                    {
+                        lineOccupied[occu_line-1] = false;
+                        occu_line = -1;
+                    }
                 }
             });
-            using (StreamWriter sw = new StreamWriter("MissingGadioItems.json"))
+            using (StreamWriter sw = new StreamWriter("FailedJob.json"))
             {
                 using (JsonWriter jw = new JsonTextWriter(sw))
                 {
-                    serializer.Serialize(jw, missingContent);
+                    serializer.Serialize(jw, failedJob);
                 }
             }
+        }
+        public static void ClearCurrentConsoleLine()
+        {
+            int currentLineCursor = Console.CursorTop;
+            Console.SetCursorPosition(0, Console.CursorTop);
+            Console.Write(new string(' ', Console.WindowWidth));
+            Console.SetCursorPosition(0, currentLineCursor);
         }
         public static string FlattenException(Exception exception)
         {
