@@ -27,6 +27,19 @@ namespace GadioParser
     public class GadioHelper
     {
         static string cdnPrefix = @"http://alioss.g-cores.com";
+        public static int GetPagesCount()
+        {
+            string HtmlPrefix = @"http://www.g-cores.com/categories/9/originals?page=";
+            HtmlDocument firstPageDoc = new HtmlDocument();
+            WebRequest request = WebRequest.CreateHttp(HtmlPrefix);
+            request.Method = "GET";
+            using (var sr = request.GetResponse().GetResponseStream())
+            {
+                firstPageDoc.Load(sr);
+            }
+            var vars = firstPageDoc.DocumentNode.ChildNodes["body"].ChildNodes["div"];
+            return -1;
+        }
         public static List<GadioItem> GetItemList(int CrawlerMaxDegreeOfParallelism = 4)
         {
             object ListLock = new object();
@@ -36,7 +49,7 @@ namespace GadioParser
 
             string HtmlPrefix = @"http://www.g-cores.com/categories/9/originals?page=";
             int maxPages = 22;
-
+            
             List<string> htmllist = new List<string>();
 
             for (int c = 1; c <= maxPages; c++)
@@ -266,6 +279,8 @@ namespace GadioParser
         public static object ConfirmedListLock = new object();
         static void Main(string[] args)
         {
+
+            var maxPages = GadioHelper.GetPagesCount();
             JsonSerializer serializer = new JsonSerializer();
             bool needDownload = true;
             int DownloaderMaxDegreeOfParallelism = 4;
